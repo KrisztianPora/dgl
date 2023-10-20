@@ -1173,6 +1173,73 @@ def fast_pull(
     )
     return F.zerocopy_from_dgl_ndarray(res_tensor)
 
+def fast_pull_cached(
+    name,
+    id_tensor,
+    part_id,
+    service_id,
+    machine_count,
+    group_count,
+    machine_id,
+    client_id,
+    local_data,
+    policy,
+    cache_mask,
+    cache_idx,
+    cache,
+):
+    """Fast-pull api used by kvstore.
+
+    Parameters
+    ----------
+    name : str
+        data name
+    id_tensor : tensor
+        data ID
+    part_id : tensor
+        partition ID of id_tensor
+    service_id : int
+        service_id of pull request
+    machine_count : int
+        total number of machine
+    group_count : int
+        total number of server inside machine
+    machine_id : int
+        current machine ID
+    client_id : int
+        current client ID
+    local_data : tensor
+        local data tensor
+    policy : PartitionPolicy
+        store the partition information
+    """
+    msg_seq = incr_msg_seq()
+    pickle_data = bytearray(pickle.dumps(([0], [name])))
+    global_id = _CAPI_DGLRPCGetGlobalIDFromLocalPartition(
+        F.zerocopy_to_dgl_ndarray(id_tensor),
+        F.zerocopy_to_dgl_ndarray(part_id),
+        machine_id,
+    )
+    global_id = F.zerocopy_from_dgl_ndarray(global_id)
+    g2l_id = policy.to_local(global_id)
+    res_tensor = _CAPI_DGLRPCCachedFastPull(
+        name,
+        int(machine_id),
+        int(machine_count),
+        int(group_count),
+        int(client_id),
+        int(service_id),
+        int(msg_seq),
+        pickle_data,
+        F.zerocopy_to_dgl_ndarray(id_tensor),
+        F.zerocopy_to_dgl_ndarray(part_id),
+        F.zerocopy_to_dgl_ndarray(g2l_id),
+        F.zerocopy_to_dgl_ndarray(local_data),
+        F.zerocopy_to_dgl_ndarray(cache_mask),
+        F.zerocopy_to_dgl_ndarray(cache_idx),
+        F.zerocopy_to_dgl_ndarray(cache),
+    )
+    return F.zerocopy_from_dgl_ndarray(res_tensor)
 
 def register_sig_handler():
     """Register for handling signal event."""

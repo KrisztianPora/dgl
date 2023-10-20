@@ -1021,6 +1021,9 @@ class KVClient(object):
         )
         # Store the tensor data with specified data name
         self._data_store = {}
+        self._cache_mask = None
+        self._cache_idx = None
+        self._cache = {}
         # Store the partition information with specified data name
         self._part_policy = {}
         # This stores all unique partition policies in the kvstore. The key is the policy name.
@@ -1436,6 +1439,28 @@ class KVClient(object):
                 self._data_store, name, local_id, local_data
             )
 
+    def cache(self, name, id_tensor):
+        assert len(name) > 0, "name cannot be empty."
+        id_tensor = utils.toindex(id_tensor)
+        id_tensor = id_tensor.tousertensor()
+        assert F.ndim(id_tensor) == 1, "ID must be a vector."
+        part_id = self._part_policy[name].to_partid(id_tensor)
+        data_to_cache = rpc.fast_pull(
+            name,
+            id_tensor,
+            part_id,
+            KVSTORE_PULL,
+            self._machine_count,
+            self._group_count,
+            self._machine_id,
+            self._client_id,
+            self._data_store[name],
+            self._part_policy[name],
+        )
+
+        self._cache[name] = data_to_cache.detach()
+        print(f"Cached {len(data_to_cache)} {name}")
+
     def pull(self, name, id_tensor):
         """Pull message from KVServer.
 
@@ -1457,18 +1482,35 @@ class KVClient(object):
         assert F.ndim(id_tensor) == 1, "ID must be a vector."
         if self._pull_handlers[name] is default_pull_handler:  # Use fast-pull
             part_id = self._part_policy[name].to_partid(id_tensor)
-            return rpc.fast_pull(
-                name,
-                id_tensor,
-                part_id,
-                KVSTORE_PULL,
-                self._machine_count,
-                self._group_count,
-                self._machine_id,
-                self._client_id,
-                self._data_store[name],
-                self._part_policy[name],
-            )
+            if self._cache_mask is not None and (name == "node~_N~feat" or name == "node~_N~labels"):
+                return rpc.fast_pull_cached(
+                    name,
+                    id_tensor,
+                    part_id,
+                    KVSTORE_PULL,
+                    self._machine_count,
+                    self._group_count,
+                    self._machine_id,
+                    self._client_id,
+                    self._data_store[name],
+                    self._part_policy[name],
+                    self._cache_mask,
+                    self._cache_idx,
+                    self._cache[name],
+                )
+            else:
+                return rpc.fast_pull(
+                    name,
+                    id_tensor,
+                    part_id,
+                    KVSTORE_PULL,
+                    self._machine_count,
+                    self._group_count,
+                    self._machine_id,
+                    self._client_id,
+                    self._data_store[name],
+                    self._part_policy[name],
+                )
         else:
             # partition data
             machine_id = self._part_policy[name].to_partid(id_tensor)

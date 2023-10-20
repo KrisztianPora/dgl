@@ -458,6 +458,153 @@ DGL_REGISTER_GLOBAL("distributed.rpc._CAPI_DGLRPCFastPull")
       *rv = res_tensor;
     });
 
+DGL_REGISTER_GLOBAL("distributed.rpc._CAPI_DGLRPCCachedFastPull")
+    .set_body([](DGLArgs args, DGLRetValue* rv) {
+      // Input
+      std::string name = args[0];
+      int local_machine_id = args[1];
+      int machine_count = args[2];
+      int group_count = args[3];
+      int client_id = args[4];
+      int service_id = args[5];
+      int64_t msg_seq = args[6];
+      std::string pickle_data = args[7];
+      NDArray ID = args[8];
+      NDArray part_id = args[9];
+      NDArray local_id = args[10];
+      NDArray local_data = args[11];
+      NDArray cache_mask = args[12];
+      NDArray cache_idx = args[13];
+      NDArray cache_data = args[14];
+      // Data
+      dgl_id_t ID_size = ID.GetSize() / sizeof(dgl_id_t);
+      dgl_id_t* ID_data = static_cast<dgl_id_t*>(ID->data);
+      dgl_id_t* part_id_data = static_cast<dgl_id_t*>(part_id->data);
+      dgl_id_t* local_id_data = static_cast<dgl_id_t*>(local_id->data);
+      char* local_data_char = static_cast<char*>(local_data->data);
+      std::vector<dgl_id_t> local_ids;
+      std::vector<dgl_id_t> local_ids_orginal;
+      std::vector<int64_t> local_data_shape;
+      std::vector<std::vector<dgl_id_t>> remote_ids(machine_count);
+      std::vector<std::vector<dgl_id_t>> remote_ids_original(machine_count);
+
+      dgl_id_t* cache_mask_data = static_cast<dgl_id_t*>(cache_mask->data);
+      dgl_id_t* cache_idx_data = static_cast<dgl_id_t*>(cache_idx->data);
+      char* cache_data_char = static_cast<char*>(cache_data->data);
+      std::vector<dgl_id_t> cache_ids;
+      std::vector<dgl_id_t> cache_ids_orginal;
+
+      // Get row size (in bytes)
+      int row_size = 1;
+      for (int i = 0; i < local_data->ndim; ++i) {
+        local_data_shape.push_back(local_data->shape[i]);
+        if (i != 0) {
+          row_size *= local_data->shape[i];
+        }
+      }
+      row_size *= (local_data->dtype.bits / 8);
+      size_t data_size = local_data.GetSize();
+      CHECK_GT(local_data_shape.size(), 0);
+      CHECK_EQ(row_size * local_data_shape[0], data_size);
+      // Get local id (used in local machine) and
+      // remote id (send to remote machine)
+      dgl_id_t idx = 0;
+      int loc = 0;
+      int hit = 0;
+      int miss = 0;
+      for (dgl_id_t i = 0; i < ID_size; ++i) {
+        dgl_id_t p_id = part_id_data[i];
+        if (static_cast<int>(p_id) == local_machine_id) {
+          dgl_id_t l_id = local_id_data[idx++];
+          CHECK_LT(l_id, local_data_shape[0]);
+          CHECK_GE(l_id, 0);
+          local_ids.push_back(l_id);
+          local_ids_orginal.push_back(i);
+          ++loc;
+        } else if (cache_mask_data[ID_data[i]] == 1) {
+          dgl_id_t c_id = cache_idx_data[ID_data[i]];
+          cache_ids.push_back(c_id);
+          cache_ids_orginal.push_back(i);
+          ++hit;
+        } else {
+          CHECK_LT(p_id, machine_count) << "Invalid partition ID.";
+          dgl_id_t id = ID_data[i];
+          remote_ids[p_id].push_back(id);
+          remote_ids_original[p_id].push_back(i);
+          ++miss;
+        }
+      }
+
+      int local = 0;
+      int cached = 0;
+      int remote = 0;
+      // Send remote id
+      int msg_count = 0;
+      for (size_t i = 0; i < remote_ids.size(); ++i) {
+        if (remote_ids[i].size() != 0) {
+          RPCMessage msg;
+          msg.service_id = service_id;
+          msg.msg_seq = msg_seq;
+          msg.client_id = client_id;
+          int lower = i * group_count;
+          int upper = (i + 1) * group_count;
+          msg.server_id =
+              dgl::RandomEngine::ThreadLocal()->RandInt(lower, upper);
+          msg.data = pickle_data;
+          NDArray tensor = dgl::aten::VecToIdArray<dgl_id_t>(remote_ids[i]);
+          msg.tensors.push_back(tensor);
+          msg.group_id = RPCContext::getInstance()->group_id;
+          SendRPCMessage(msg, msg.server_id);
+          msg_count++;
+        }
+      }
+      local_data_shape[0] = ID_size;
+      NDArray res_tensor = NDArray::Empty(
+          local_data_shape, local_data->dtype, DGLContext{kDGLCPU, 0});
+      char* return_data = static_cast<char*>(res_tensor->data);
+      // Copy local data
+      parallel_for(0, local_ids.size(), [&](size_t b, size_t e) {
+        for (auto i = b; i < e; ++i) {
+          CHECK_GE(
+              ID_size * row_size, local_ids_orginal[i] * row_size + row_size);
+          CHECK_GE(data_size, local_ids[i] * row_size + row_size);
+          CHECK_GE(local_ids[i], 0);
+          memcpy(
+              return_data + local_ids_orginal[i] * row_size,
+              local_data_char + local_ids[i] * row_size, row_size);
+          ++local;
+        }
+      });
+
+      // Copy cache data
+      dgl_id_t id_size = cache_ids.size();
+      for (size_t n = 0; n < id_size; ++n) {
+          memcpy(
+              return_data + cache_ids_orginal[n] * row_size,
+              cache_data_char + cache_ids[n] * row_size, row_size);
+          ++cached;
+      }
+
+      // Recv remote message
+      int recv_cnt = 0;
+      while (recv_cnt < msg_count) {
+        RPCMessage msg;
+        auto status = RecvRPCMessage(&msg, 0);
+        CHECK_EQ(status, kRPCSuccess);
+        ++recv_cnt;
+        int part_id = msg.server_id / group_count;
+        char* data_char = static_cast<char*>(msg.tensors[0]->data);
+        dgl_id_t id_size = remote_ids[part_id].size();
+        for (size_t n = 0; n < id_size; ++n) {
+          memcpy(
+              return_data + remote_ids_original[part_id][n] * row_size,
+              data_char + n * row_size, row_size);
+          ++remote;
+        }
+      }
+      *rv = res_tensor;
+    });
+
 DGL_REGISTER_GLOBAL("distributed.rpc._CAPI_DGLRPCGetGroupID")
     .set_body([](DGLArgs args, DGLRetValue* rv) {
       *rv = RPCContext::getInstance()->group_id;

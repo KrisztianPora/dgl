@@ -7,6 +7,7 @@ from collections import namedtuple
 from collections.abc import MutableMapping
 
 import numpy as np
+import torch as th
 
 from .. import backend as F, heterograph_index
 from .._ffi.ndarray import empty_shared_mem
@@ -32,6 +33,7 @@ from .graph_services import (
     find_edges as dist_find_edges,
     in_degrees as dist_in_degrees,
     out_degrees as dist_out_degrees,
+    sample_neighbors as dist_sample_neighbors,
 )
 from .kvstore import get_kvstore, KVServer
 from .partition import (
@@ -1374,6 +1376,37 @@ class DistGraph:
                 self, seed_nodes, fanout, replace=replace, prob=prob
             )
         return frontier
+
+    def cache_remote_node_data(self, nodes, num_hops):
+        pb = self.get_partition_book()
+        local_nid = pb.partid2nids(pb.partid).detach().numpy()
+        remote_nodes = np.setdiff1d(nodes.numpy(), local_nid)
+
+        seed = remote_nodes
+        remote_nodes_with_neighbors = th.tensor(seed).detach()
+
+        for layer in range(num_hops):
+            sample = dist_sample_neighbors(self, seed, "-1")
+            sampled_nodes = th.unique(sample.edges(form="uv")[0]).detach()
+            remote_nodes_with_neighbors = th.cat((remote_nodes_with_neighbors, sampled_nodes))
+            seed = sampled_nodes
+
+        remote_nodes_with_neighbors = th.unique(remote_nodes_with_neighbors).detach()
+
+        full_list = range(self.num_nodes())
+        cached_list = remote_nodes_with_neighbors.detach().numpy()
+
+        cache_mask = np.zeros(self.num_nodes(), dtype=int)
+        cache_mask[cached_list] = 1
+
+        cache_dict = {cached_list[i]: i for i in range(len(cached_list))}
+        cache_idx = np.array([cache_dict.get(node_id, -1) for node_id in full_list])
+
+        if len(remote_nodes) > 0:
+            self._client._cache_mask = th.tensor(cache_mask).detach()
+            self._client._cache_idx = th.tensor(cache_idx).detach()
+            self._client.cache("node~_N~feat", remote_nodes_with_neighbors)
+            self._client.cache("node~_N~labels", remote_nodes_with_neighbors)
 
     def _get_ndata_names(self, ntype=None):
         """Get the names of all node data."""
