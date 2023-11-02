@@ -1394,19 +1394,24 @@ class DistGraph:
         remote_nodes_with_neighbors = th.unique(remote_nodes_with_neighbors).detach()
 
         full_list = range(self.num_nodes())
-        cached_list = remote_nodes_with_neighbors.detach().numpy()
+        cached_list_array = np.setdiff1d(remote_nodes_with_neighbors.detach().numpy(), local_nid)
+        cached_list_tensor = th.tensor(cached_list_array).detach()
 
         cache_mask = np.zeros(self.num_nodes(), dtype=int)
-        cache_mask[cached_list] = 1
+        cache_mask[cached_list_array] = 1
 
-        cache_dict = {cached_list[i]: i for i in range(len(cached_list))}
+        cache_dict = {cached_list_array[i]: i for i in range(len(cached_list_array))}
         cache_idx = np.array([cache_dict.get(node_id, -1) for node_id in full_list])
 
         if len(remote_nodes) > 0:
             self._client._cache_mask = th.tensor(cache_mask).detach()
             self._client._cache_idx = th.tensor(cache_idx).detach()
-            self._client.cache("node~_N~feat", remote_nodes_with_neighbors)
-            self._client.cache("node~_N~labels", remote_nodes_with_neighbors)
+            self._client.cache("node~_N~feat", cached_list_tensor)
+            self._client.cache("node~_N~labels", cached_list_tensor)
+            
+        del local_nid
+        del remote_nodes_with_neighbors
+        del cached_list_tensor
 
     def _get_ndata_names(self, ntype=None):
         """Get the names of all node data."""

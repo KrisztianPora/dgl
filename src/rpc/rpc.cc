@@ -509,9 +509,6 @@ DGL_REGISTER_GLOBAL("distributed.rpc._CAPI_DGLRPCCachedFastPull")
       // Get local id (used in local machine) and
       // remote id (send to remote machine)
       dgl_id_t idx = 0;
-      int loc = 0;
-      int hit = 0;
-      int miss = 0;
       for (dgl_id_t i = 0; i < ID_size; ++i) {
         dgl_id_t p_id = part_id_data[i];
         if (static_cast<int>(p_id) == local_machine_id) {
@@ -520,24 +517,18 @@ DGL_REGISTER_GLOBAL("distributed.rpc._CAPI_DGLRPCCachedFastPull")
           CHECK_GE(l_id, 0);
           local_ids.push_back(l_id);
           local_ids_orginal.push_back(i);
-          ++loc;
         } else if (cache_mask_data[ID_data[i]] == 1) {
           dgl_id_t c_id = cache_idx_data[ID_data[i]];
           cache_ids.push_back(c_id);
           cache_ids_orginal.push_back(i);
-          ++hit;
         } else {
           CHECK_LT(p_id, machine_count) << "Invalid partition ID.";
           dgl_id_t id = ID_data[i];
           remote_ids[p_id].push_back(id);
           remote_ids_original[p_id].push_back(i);
-          ++miss;
         }
       }
 
-      int local = 0;
-      int cached = 0;
-      int remote = 0;
       // Send remote id
       int msg_count = 0;
       for (size_t i = 0; i < remote_ids.size(); ++i) {
@@ -572,18 +563,18 @@ DGL_REGISTER_GLOBAL("distributed.rpc._CAPI_DGLRPCCachedFastPull")
           memcpy(
               return_data + local_ids_orginal[i] * row_size,
               local_data_char + local_ids[i] * row_size, row_size);
-          ++local;
         }
       });
 
       // Copy cache data
       dgl_id_t id_size = cache_ids.size();
-      for (size_t n = 0; n < id_size; ++n) {
+      parallel_for(0, cache_ids.size(), [&](size_t b, size_t e) {
+        for (auto i = b; i < e; ++i) {
           memcpy(
-              return_data + cache_ids_orginal[n] * row_size,
-              cache_data_char + cache_ids[n] * row_size, row_size);
-          ++cached;
-      }
+              return_data + cache_ids_orginal[i] * row_size,
+              cache_data_char + cache_ids[i] * row_size, row_size);
+        }
+      });
 
       // Recv remote message
       int recv_cnt = 0;
@@ -599,7 +590,6 @@ DGL_REGISTER_GLOBAL("distributed.rpc._CAPI_DGLRPCCachedFastPull")
           memcpy(
               return_data + remote_ids_original[part_id][n] * row_size,
               data_char + n * row_size, row_size);
-          ++remote;
         }
       }
       *rv = res_tensor;

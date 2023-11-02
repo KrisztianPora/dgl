@@ -11,6 +11,8 @@ from . import rpc
 from .graph_partition_book import EdgePartitionPolicy, NodePartitionPolicy
 from .standalone_kvstore import KVClient as SA_KVClient
 
+import time
+
 ############################ Register KVStore Requsts and Responses ###############################
 
 KVSTORE_PULL = 901231
@@ -1440,6 +1442,7 @@ class KVClient(object):
             )
 
     def cache(self, name, id_tensor):
+        start = time.time()
         assert len(name) > 0, "name cannot be empty."
         id_tensor = utils.toindex(id_tensor)
         id_tensor = id_tensor.tousertensor()
@@ -1459,7 +1462,8 @@ class KVClient(object):
         )
 
         self._cache[name] = data_to_cache.detach()
-        print(f"Cached {len(data_to_cache)} {name}")
+        end = time.time() - start
+        print(f"Rank {self._machine_id}: Cached {len(data_to_cache)} {name} under {end} seconds")
 
     def pull(self, name, id_tensor):
         """Pull message from KVServer.
